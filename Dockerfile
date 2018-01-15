@@ -1,27 +1,72 @@
-FROM denvazh/scala:2.11.8-openjdk8
+###############################################################################
+#  Licensed to the Apache Software Foundation (ASF) under one
+#  or more contributor license agreements.  See the NOTICE file
+#  distributed with this work for additional information
+#  regarding copyright ownership.  The ASF licenses this file
+#  to you under the Apache License, Version 2.0 (the
+#  "License"); you may not use this file except in compliance
+#  with the License.  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+# limitations under the License.
+###############################################################################
 
-ARG HADOOP_VERSION=27
-ARG FLINK_VERSION=1.2.1
-ARG SCALA_BINARY_VERSION=2.11
+FROM openjdk:8-jre-alpine
 
-ENV FLINK_INSTALL_PATH /opt
-ENV FLINK_HOME $FLINK_INSTALL_PATH/flink
-ENV PATH $PATH:$FLINK_HOME/bin
+# Install dependencies, bash and su-exec for easy step-down from root
+RUN apk add --no-cache bash libc6-compat snappy 'su-exec>=0.2'
 
-RUN set -x && \
-    mkdir -p ${FLINK_INSTALL_PATH} && \
-    apk --update add --virtual curl && \
-    curl -s $(curl -s https://www.apache.org/dyn/closer.cgi\?preferred\=true)flink/flink-${FLINK_VERSION}/flink-${FLINK_VERSION}-bin-hadoop${HADOOP_VERSION}-scala_${SCALA_BINARY_VERSION}.tgz | \
-    tar xz -C ${FLINK_INSTALL_PATH} && \
-    ln -s ${FLINK_INSTALL_PATH}/flink-${FLINK_VERSION} ${FLINK_HOME} && \
-    sed -i -e "s/echo \$mypid >> \$pid/echo \$mypid >> \$pid \&\& wait/g" ${FLINK_HOME}/bin/flink-daemon.sh && \
-    sed -i -e "s/ > \"\$out\" 2>&1 < \/dev\/null//g" ${FLINK_HOME}/bin/flink-daemon.sh && \
-    rm -rf /var/cache/apk/* && \
-    echo Installed Flink ${FLINK_VERSION} to ${FLINK_HOME}
+# Configure Flink version
+ENV FLINK_VERSION=1.4.0 \
+    HADOOP_VERSION=28 \
+    SCALA_VERSION=2.11
 
-ADD docker-entrypoint.sh ${FLINK_HOME}/bin/
-# Additional output to console, allows gettings logs with 'docker-compose logs'
-ADD log4j.properties ${FLINK_HOME}/conf/
+# Prepare environment
+ENV FLINK_HOME=/opt/flink
+ENV PATH=$FLINK_HOME/bin:$PATH
+RUN addgroup -S -g 9999 flink && \
+    adduser -D -S -H -u 9999 -G flink -h $FLINK_HOME flink
+WORKDIR $FLINK_HOME
 
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["sh", "-c"]
+ENV FLINK_URL_FILE_PATH=flink/flink-${FLINK_VERSION}/flink-${FLINK_VERSION}-bin-hadoop${HADOOP_VERSION}-scala_${SCALA_VERSION}.tgz
+# Not all mirrors have the .asc files
+ENV FLINK_TGZ_URL=https://www.apache.org/dyn/closer.cgi?action=download&filename=${FLINK_URL_FILE_PATH} \
+    FLINK_ASC_URL=https://www.apache.org/dist/${FLINK_URL_FILE_PATH}.asc
+
+# For GPG verification instead of relying on key servers
+COPY KEYS /KEYS
+
+# Install Flink
+RUN set -ex; \
+  apk add --no-cache --virtual .build-deps \
+    ca-certificates \
+    gnupg \
+    openssl \
+    tar \
+  ; \
+  \
+  wget -nv -O flink.tgz "$FLINK_TGZ_URL"; \
+  wget -nv -O flink.tgz.asc "$FLINK_ASC_URL"; \
+  \
+  export GNUPGHOME="$(mktemp -d)"; \
+  gpg --import /KEYS; \
+  gpg --batch --verify flink.tgz.asc flink.tgz; \
+  rm -rf "$GNUPGHOME" flink.tgz.asc; \
+  \
+  tar -xf flink.tgz --strip-components=1; \
+  rm flink.tgz; \
+  \
+  apk del .build-deps; \
+  \
+  chown -R flink:flink .;
+
+# Configure container
+COPY docker-entrypoint.sh /
+ENTRYPOINT ["/docker-entrypoint.sh"]
+EXPOSE 6123 8081
+CMD ["help"]
